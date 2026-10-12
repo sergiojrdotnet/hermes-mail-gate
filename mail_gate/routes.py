@@ -10,7 +10,7 @@ PLUGIN_NAME = "hermes-mail-gate"
 SECRET_ENV = "MAIL_GATE_WEBHOOK_SECRET"
 PUBLIC_BASE_ENV = "MAIL_GATE_PUBLIC_BASE"
 WRAPPERS = {"mail": "mail_gate.py", "mail-trusted": "mail_gate_trusted.py"}
-RESTRICTED_TOOLSETS = ["kanban", "mail_gate"]
+RESTRICTED_TOOLSETS = ["kanban", "mail_gate", "no_mcp"]
 
 _HEADER = """From: {mail.from_name} <{mail.from}>
 To: {mail.to}

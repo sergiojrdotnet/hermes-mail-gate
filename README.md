@@ -10,7 +10,8 @@ mailbox and the bot. Every inbound email is judged by a script before any model 
    bot (`*`). The most specific rule wins: the bot's address rule, the bot's domain rule, then the same for every bot.
 3. **Outcome.**
    - `trust` wakes the bot on the *trusted* route with its normal tools.
-   - `allow` wakes it on the *restricted* route: only the board and its own mailbox.
+   - `allow` wakes it on the *restricted* route: only the board and its own mailbox (`no_mcp` also drops every MCP
+     connector from that run).
    - `block` drops the message silently.
    - No rule: the message is held and the sender waits for a decision in the Mail Gate page.
 
