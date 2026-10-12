@@ -116,8 +116,8 @@
       return options.concat(bots.map(b => [b.bot, b.address || b.bot]))
     }
 
-    function Pending({ bots, onChanged }) {
-      const [state, reload] = useLoad(() => api.get('/pending'), [])
+    function Pending({ bots, version, onChanged }) {
+      const [state, reload] = useLoad(() => api.get('/pending'), [version])
       const [busy, setBusy] = useState('')
       const [armed, setArmed] = useState('')
       const [error, setError] = useState('')
@@ -228,7 +228,7 @@
                 h('button', { type: 'button', style: s.button(), onClick: () => remove(rule) }, 'Remove'))))))))
     }
 
-    function Activity({ bots }) {
+    function Activity({ bots, version }) {
       const [bot, setBot] = useState('')
       const [outcome, setOutcome] = useState('')
       const [events, setEvents] = useState([])
@@ -244,7 +244,7 @@
       useEffect(() => {
         setError('')
         query().then(r => { setEvents(r.events); setMore(r.events.length === 100) }).catch(err => setError(String(err && err.message || err)))
-      }, [bot, outcome])
+      }, [bot, outcome, version])
       const loadMore = () => query(events[events.length - 1].id)
         .then(r => { setEvents(events.concat(r.events)); setMore(r.events.length === 100) })
         .catch(err => setError(String(err && err.message || err)))
@@ -332,11 +332,11 @@
       return out
     }
 
-    function Stats({ bots }) {
+    function Stats({ bots, version }) {
       const [period, setPeriod] = useState('day')
       const [bot, setBot] = useState('')
       const count = { day: 30, week: 12, month: 12 }[period]
-      const [state] = useLoad(() => api.get(`/stats?period=${period}&buckets=${count}${bot ? `&bot=${encodeURIComponent(bot)}` : ''}`), [period, bot])
+      const [state] = useLoad(() => api.get(`/stats?period=${period}&buckets=${count}${bot ? `&bot=${encodeURIComponent(bot)}` : ''}`), [period, bot, version])
       const series = Object.keys(OUTCOMES)
       const buckets = useMemo(() => {
         const frame = bucketsFor(period, count).map(b => ({ ...b, values: {} }))
@@ -381,10 +381,11 @@
       useEffect(() => {
         api.get('/bots').then(r => setBots(r.bots)).catch(() => {})
         refreshSummary()
-        const timer = setInterval(refreshSummary, 30000)
+        const timer = setInterval(refreshSummary, 15000)
         return () => clearInterval(timer)
       }, [refreshSummary])
       const pendingCount = summary ? summary.pending_senders : 0
+      const version = summary ? JSON.stringify([summary.pending_keys, summary.today]) : ''
       const tabs = [['pending', pendingCount ? `Pending (${pendingCount})` : 'Pending'], ['rules', 'Rules'], ['activity', 'Activity'], ['stats', 'Stats']]
 
       return h('div', { style: s.page },
@@ -395,10 +396,10 @@
         h('div', { style: s.tabs, role: 'tablist' }, tabs.map(([key, label]) => h('button', {
           key, type: 'button', role: 'tab', 'aria-selected': tab === key, style: s.tab(tab === key), onClick: () => setTab(key)
         }, label))),
-        tab === 'pending' && h(Pending, { bots, onChanged: refreshSummary }),
+        tab === 'pending' && h(Pending, { bots, version, onChanged: refreshSummary }),
         tab === 'rules' && h(Rules, { bots }),
-        tab === 'activity' && h(Activity, { bots }),
-        tab === 'stats' && h(Stats, { bots }))
+        tab === 'activity' && h(Activity, { bots, version }),
+        tab === 'stats' && h(Stats, { bots, version }))
     }
 
     return App
