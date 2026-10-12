@@ -9,7 +9,6 @@ import traceback
 from typing import Any, Optional
 
 from mail_gate import mailbox
-from mail_gate.config import load_config
 from mail_gate.message import describe_attachments, single_sender, summarize
 from mail_gate.paths import data_dir
 from mail_gate.store import Store
@@ -21,7 +20,7 @@ RESTRICTED, TRUSTED = "mail", "mail-trusted"
 
 def _enrich(mail: dict[str, Any]) -> dict[str, Any]:
     try:
-        stored = mailbox.describe(mail["bot"], mail["message_id"])
+        stored = mailbox.describe(mailbox.credentials(mail["bot"]), mail["message_id"])
     except Exception:
         stored = None
     if stored is None:
@@ -36,7 +35,7 @@ def _enrich(mail: dict[str, Any]) -> dict[str, Any]:
 
 def _thread(mail: dict[str, Any]) -> str:
     try:
-        earlier = mailbox.thread_messages(mail["bot"], mail.get("references") or [])
+        earlier = mailbox.thread_messages(mailbox.credentials(mail["bot"]), mail.get("references") or [])
     except Exception:
         earlier = []
     if not earlier:
@@ -50,27 +49,24 @@ def _deliver(store: Store, bot: str, route: str, outcome: str, mail: dict[str, A
     return json.dumps({"mail": mail, "thread": _thread(mail)})
 
 
-def evaluate(store: Store, bot: str, mode: str, payload: dict[str, Any], owners: list[str]) -> str:
-    release = (payload.get("mail_gate") or {}).get("release") if isinstance(payload.get("mail_gate"), dict) else None
-    if release is not None:
-        return _release(store, bot, int(release))
+def evaluate(store: Store, bot: str, mode: str, payload: dict[str, Any]) -> str:
+    control = payload.get("mail_gate")
+    if isinstance(control, dict) and control.get("release") is not None:
+        return _release(store, bot, mode, int(control["release"]))
     sender = single_sender(payload)
     recipients = payload.get("recipients") or [""]
     mail = summarize(payload, bot, str((payload.get("session") or {}).get("recipient") or recipients[0]))
     if not store.mark_seen(bot, mode, mail["message_id"]):
         return SILENT
     authenticated, auth = authentication(payload, mail["from_domain"]) if sender else (False, "no single From address")
-    is_owner = bool(sender) and mail["from"] in owners
+    action = decide(store.rules_for(bot), bot, mail["from"], mail["from_domain"]) if authenticated else None
     if mode == TRUSTED:
-        if not (authenticated and is_owner):
-            return SILENT
-        return _deliver(store, bot, mode, "delivered", mail, auth)
-    if is_owner and authenticated:
-        return SILENT
+        return _deliver(store, bot, mode, "delivered", mail, auth) if action == "trust" else SILENT
     if not authenticated:
         store.log(bot, mode, "dropped-unauthenticated", mail, auth)
         return SILENT
-    action = decide(store.rules_for(bot), bot, mail["from"], mail["from_domain"])
+    if action == "trust":
+        return SILENT
     if action == "block":
         store.log(bot, mode, "dropped-blocked", mail, auth)
         return SILENT
@@ -81,19 +77,20 @@ def evaluate(store: Store, bot: str, mode: str, payload: dict[str, Any], owners:
     return SILENT
 
 
-def _release(store: Store, bot: str, held_id: int) -> str:
+def _release(store: Store, bot: str, mode: str, held_id: int) -> str:
+    """Re-evaluate held mail after a decision; only the route matching the decision delivers it."""
     row = store.held_by_id(held_id)
     if row is None or row["bot"] != bot:
         return SILENT
     mail = json.loads(row["mail"])
     action = decide(store.rules_for(bot), bot, mail["from"], mail["from_domain"])
-    if action is None:
+    if action is None or (action == "allow" and mode != RESTRICTED) or (action == "trust" and mode != TRUSTED):
         return SILENT
     store.drop_held(held_id)
     if action == "block":
-        store.log(bot, RESTRICTED, "dropped-blocked", mail, row["auth"] or "")
+        store.log(bot, mode, "dropped-blocked", mail, row["auth"] or "")
         return SILENT
-    return _deliver(store, bot, RESTRICTED, "released", mail, row["auth"] or "")
+    return _deliver(store, bot, mode, "released", mail, row["auth"] or "")
 
 
 def main(bot: str, mode: str, stdin_text: Optional[str] = None) -> int:
@@ -105,7 +102,7 @@ def main(bot: str, mode: str, stdin_text: Optional[str] = None) -> int:
             return 0
         store = Store()
         store.purge()
-        print(evaluate(store, bot, mode, payload, load_config().owners))
+        print(evaluate(store, bot, mode, payload))
         return 0
     except Exception:
         with open(data_dir() / "gate-errors.log", "a") as handle:

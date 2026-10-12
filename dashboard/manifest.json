@@ -1,0 +1,14 @@
+{
+  "name": "hermes-mail-gate",
+  "label": "Mail Gate",
+  "description": "Allow, block and trust rules per bot mailbox, senders waiting for a decision, and gate activity.",
+  "icon": "Mail",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/mail-gate",
+    "position": "after:config"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

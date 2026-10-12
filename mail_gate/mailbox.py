@@ -11,6 +11,8 @@ from email.utils import formataddr, formatdate, make_msgid
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+Account = tuple[str, str]
+
 from mail_gate.paths import profile_env
 
 IMAP_HOST = "imap.forwardemail.net"
@@ -22,7 +24,7 @@ SENT_FOLDER = "Sent"
 JUNK_FOLDER = "Junk"
 
 
-def credentials(bot: str) -> tuple[str, str]:
+def credentials(bot: str) -> Account:
     env = profile_env(bot)
     address, password = env.get("EMAIL_ADDRESS", ""), env.get("EMAIL_PASSWORD", "")
     if not address or not password:
@@ -31,8 +33,8 @@ def credentials(bot: str) -> tuple[str, str]:
 
 
 @contextmanager
-def imap_session(bot: str, folder: str = "INBOX", readonly: bool = True) -> Iterator[imaplib.IMAP4_SSL]:
-    address, password = credentials(bot)
+def imap_session(account: Account, folder: str = "INBOX", readonly: bool = True) -> Iterator[imaplib.IMAP4_SSL]:
+    address, password = account
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=20)
     try:
         imap.login(address, password)
@@ -86,9 +88,9 @@ def attachments_of(message: Message) -> list[dict[str, Any]]:
     return found
 
 
-def describe(bot: str, message_id: str, attempts: int = 4, delay: float = 1.5) -> Optional[dict[str, Any]]:
+def describe(account: Account, message_id: str, attempts: int = 4, delay: float = 1.5) -> Optional[dict[str, Any]]:
     """Size and attachment list of a stored message; the mailbox copy can land a moment after the webhook."""
-    with imap_session(bot) as imap:
+    with imap_session(account) as imap:
         for attempt in range(attempts):
             uid = find_uid(imap, message_id)
             if uid:
@@ -105,14 +107,14 @@ def describe(bot: str, message_id: str, attempts: int = 4, delay: float = 1.5) -
     return None
 
 
-def thread_messages(bot: str, references: list[str], limit: int = 5, max_chars: int = 4000) -> list[dict[str, str]]:
+def thread_messages(account: Account, references: list[str], limit: int = 5, max_chars: int = 4000) -> list[dict[str, str]]:
     """Earlier messages of a thread found in this mailbox, oldest first, for one-shot webhook runs."""
     found: list[dict[str, str]] = []
     if not references:
         return found
     for folder in ("INBOX", "Sent"):
         try:
-            with imap_session(bot, folder) as imap:
+            with imap_session(account, folder) as imap:
                 for message_id in references[-limit:]:
                     uid = find_uid(imap, message_id)
                     if not uid:
@@ -139,10 +141,10 @@ def _plain_text(message: Message) -> str:
 
 
 
-def send(bot: str, to: list[str], subject: str, text: str, html: Optional[str] = None, cc: Optional[list[str]] = None,
+def send(account: Account, to: list[str], subject: str, text: str, html: Optional[str] = None, cc: Optional[list[str]] = None,
          attachments: Optional[list[str]] = None, in_reply_to: str = "", references: Optional[list[str]] = None,
          sender_name: str = "") -> str:
-    address, password = credentials(bot)
+    address, password = account
     message = EmailMessage()
     message["From"] = formataddr((sender_name, address)) if sender_name else address
     message["To"] = ", ".join(to)
@@ -169,15 +171,15 @@ def send(bot: str, to: list[str], subject: str, text: str, html: Optional[str] =
         smtp.login(address, password)
         smtp.send_message(message)
     try:
-        with imap_session(bot, SENT_FOLDER, readonly=False) as imap:
+        with imap_session(account, SENT_FOLDER, readonly=False) as imap:
             imap.append(_quote(SENT_FOLDER), "(\\Seen)", None, message.as_bytes())
     except Exception:
         pass
     return str(message["Message-ID"])
 
 
-def move_to_junk(bot: str, message_id: str) -> bool:
-    with imap_session(bot, readonly=False) as imap:
+def move_to_junk(account: Account, message_id: str) -> bool:
+    with imap_session(account, readonly=False) as imap:
         uid = find_uid(imap, message_id)
         if not uid:
             return False
@@ -189,8 +191,8 @@ def move_to_junk(bot: str, message_id: str) -> bool:
         return True
 
 
-def read(bot: str, message_id: str) -> Optional[dict[str, Any]]:
-    with imap_session(bot) as imap:
+def read(account: Account, message_id: str) -> Optional[dict[str, Any]]:
+    with imap_session(account) as imap:
         uid = find_uid(imap, message_id)
         if not uid:
             return None
@@ -202,8 +204,8 @@ def read(bot: str, message_id: str) -> Optional[dict[str, Any]]:
                 "attachments": attachments_of(message)}
 
 
-def save_attachment(bot: str, message_id: str, name: str, directory: str) -> Optional[str]:
-    with imap_session(bot) as imap:
+def save_attachment(account: Account, message_id: str, name: str, directory: str) -> Optional[str]:
+    with imap_session(account) as imap:
         uid = find_uid(imap, message_id)
         if not uid:
             return None
@@ -218,3 +220,14 @@ def save_attachment(bot: str, message_id: str, name: str, directory: str) -> Opt
         target.write_bytes(part.get_payload(decode=True) or b"")
         return str(target)
     return None
+
+
+def headers(account: Account, message_id: str) -> Optional[dict[str, Any]]:
+    with imap_session(account) as imap:
+        uid = find_uid(imap, message_id)
+        if not uid:
+            return None
+        status, data = imap.uid("FETCH", uid, "(BODY.PEEK[HEADER])")
+        message = email.message_from_bytes(data[0][1])
+    return {"subject": decoded(message.get("Subject")),
+            "references": (message.get("References") or "").split()}

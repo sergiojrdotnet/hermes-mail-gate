@@ -1,6 +1,5 @@
 import json
 import sqlite3
-from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -16,7 +15,7 @@ CREATE TABLE IF NOT EXISTS rules (
     bot TEXT NOT NULL,
     scope TEXT NOT NULL CHECK (scope IN ('address', 'domain')),
     value TEXT NOT NULL,
-    action TEXT NOT NULL CHECK (action IN ('allow', 'block')),
+    action TEXT NOT NULL CHECK (action IN ('allow', 'block', 'trust')),
     created_at TEXT NOT NULL,
     PRIMARY KEY (bot, scope, value)
 );
@@ -124,9 +123,10 @@ class Store:
     def held_by_id(self, held_id: int) -> Optional[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM held WHERE id = ?", (held_id,)).fetchone()
 
-    def held_in_domain(self, bot: str, domain: str) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM held WHERE bot = ? AND sender_domain = ? ORDER BY id",
-                                 (bot, domain)).fetchall()
+    def held_matching(self, bot: str, scope: str, value: str) -> list[sqlite3.Row]:
+        column = "sender" if scope == "address" else "sender_domain"
+        return self.conn.execute(f"SELECT * FROM held WHERE (bot = ? OR ? = ?) AND {column} = ? ORDER BY id",
+                                 (bot, bot, GLOBAL_BOT, value.lower())).fetchall()
 
     def drop_held(self, held_id: int) -> None:
         self.conn.execute("DELETE FROM held WHERE id = ?", (held_id,))
@@ -173,7 +173,3 @@ class Store:
             f"SELECT {bucket_sql} AS bucket, bot, outcome, COUNT(*) AS total FROM events"
             f" WHERE at >= ? {bot_clause} GROUP BY bucket, bot, outcome ORDER BY bucket", params).fetchall()
         return [dict(row) for row in rows]
-
-
-def open_store() -> closing:
-    return closing(Store())

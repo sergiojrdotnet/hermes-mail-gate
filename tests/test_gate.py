@@ -61,6 +61,7 @@ class VerdictTest(unittest.TestCase):
         self.assertIsNone(decide(rules, "cto", "a@vendor.example", "vendor.example"))
 
 
+@mock.patch("mail_gate.mailbox.credentials", return_value=("ceo@example.org", "secret"))
 @mock.patch("mail_gate.mailbox.thread_messages", return_value=[])
 @mock.patch("mail_gate.mailbox.describe",
             return_value={"uid": "5", "size": 1234, "attachments": [{"name": "a.pdf", "type": "application/pdf",
@@ -71,12 +72,13 @@ class GateTest(unittest.TestCase):
         for suffix in ("", "-wal", "-shm"):
             Path(str(db) + suffix).unlink(missing_ok=True)
         self.store = Store()
+        self.store.set_rule(GLOBAL_BOT, "address", OWNER, "trust")
 
     def tearDown(self):
         self.store.close()
 
     def run_gate(self, body, mode=gate.RESTRICTED, bot="ceo"):
-        return gate.evaluate(self.store, bot, mode, body, [OWNER])
+        return gate.evaluate(self.store, bot, mode, body)
 
     def outcomes(self):
         return [event["outcome"] for event in reversed(self.store.events())]
@@ -138,6 +140,28 @@ class GateTest(unittest.TestCase):
         self.assertNotEqual(self.run_gate(payload()), gate.SILENT)
         self.assertEqual(self.run_gate(payload()), gate.SILENT)
         self.assertEqual(self.outcomes(), ["delivered"])
+
+    def test_trusted_domain_with_blocked_address(self, *_):
+        self.store.set_rule("ceo", "domain", "partner.example", "trust")
+        self.store.set_rule("ceo", "address", "intern@partner.example", "block")
+        trusted = payload(sender="boss@partner.example", message_id="<t1@partner.example>")
+        blocked = payload(sender="intern@partner.example", message_id="<t2@partner.example>")
+        self.assertNotEqual(self.run_gate(trusted, mode=gate.TRUSTED), gate.SILENT)
+        self.assertEqual(self.run_gate(trusted), gate.SILENT)
+        self.assertEqual(self.run_gate(blocked, mode=gate.TRUSTED), gate.SILENT)
+        self.assertEqual(self.run_gate(blocked), gate.SILENT)
+        self.assertEqual(self.outcomes(), ["delivered", "dropped-blocked"])
+
+    def test_held_mail_released_on_trust_goes_only_to_the_trusted_route(self, *_):
+        self.run_gate(payload())
+        held_id = self.store.held_for("ceo", "supplier@vendor.example")[0]["id"]
+        self.store.set_rule("ceo", "address", "supplier@vendor.example", "trust")
+        self.assertEqual(self.run_gate({"mail_gate": {"release": held_id}}), gate.SILENT)
+        self.assertEqual(len(self.store.pending()), 1)
+        delivered = json.loads(self.run_gate({"mail_gate": {"release": held_id}}, mode=gate.TRUSTED))
+        self.assertEqual(delivered["mail"]["from"], "supplier@vendor.example")
+        self.assertEqual(self.store.pending(), [])
+        self.assertEqual(self.outcomes(), ["held", "released"])
 
     def test_rules_are_per_bot(self, *_):
         self.store.set_rule("cfo", "domain", "vendor.example", "allow")
