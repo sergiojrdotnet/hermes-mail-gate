@@ -1,6 +1,8 @@
 import email
 import imaplib
+import logging
 import mimetypes
+import re
 import smtplib
 import ssl
 import time
@@ -15,6 +17,7 @@ Account = tuple[str, str]
 
 from mail_gate.paths import profile_env
 
+log = logging.getLogger(__name__)
 IMAP_HOST = "imap.forwardemail.net"
 IMAP_PORT = 993
 MAX_FETCH_BYTES = 15_000_000
@@ -22,6 +25,7 @@ SMTP_HOST = "smtp.forwardemail.net"
 SMTP_PORT = 465
 SENT_FOLDER = "Sent"
 JUNK_FOLDER = "Junk"
+_LIST_ROW = re.compile(r'^\((?P<flags>[^)]*)\) (?:"(?:[^"\\]|\\.)*"|NIL) (?P<name>.+)$')
 
 
 def credentials(bot: str) -> Account:
@@ -47,6 +51,24 @@ def imap_session(account: Account, folder: str = "INBOX", readonly: bool = True)
             imap.logout()
         except Exception:
             pass
+
+
+def special_use_folder(listing: list[Any], flag: str) -> Optional[str]:
+    """The folder a LIST reply marks with a special-use ``flag`` (RFC 6154), such as ``\\Sent``."""
+    for row in listing:
+        match = _LIST_ROW.match(row.decode(errors="replace") if isinstance(row, bytes) else str(row or ""))
+        if match and flag.lower() in match["flags"].lower().split():
+            name = match["name"]
+            if name.startswith('"') and name.endswith('"'):
+                name = re.sub(r'\\(.)', r"\1", name[1:-1])
+            return name
+    return None
+
+
+def sent_folder(imap: imaplib.IMAP4_SSL) -> str:
+    """This mailbox's Sent folder: Forward Email names it "Sent Mail", other servers "Sent"."""
+    status, listing = imap.list()
+    return (special_use_folder(listing or [], "\\Sent") if status == "OK" else None) or SENT_FOLDER
 
 
 def _quote(name: str) -> str:
@@ -112,9 +134,12 @@ def thread_messages(account: Account, references: list[str], limit: int = 5, max
     found: list[dict[str, str]] = []
     if not references:
         return found
-    for folder in ("INBOX", "Sent"):
-        try:
-            with imap_session(account, folder) as imap:
+    try:
+        with imap_session(account) as imap:
+            for folder in ("INBOX", sent_folder(imap)):
+                status, _ = imap.select(_quote(folder), readonly=True)
+                if status != "OK":
+                    continue
                 for message_id in references[-limit:]:
                     uid = find_uid(imap, message_id)
                     if not uid:
@@ -126,8 +151,8 @@ def thread_messages(account: Account, references: list[str], limit: int = 5, max
                     found.append({"message_id": message_id, "from": decoded(message.get("From")),
                                   "date": message.get("Date", ""), "subject": decoded(message.get("Subject")),
                                   "text": _plain_text(message)[:max_chars]})
-        except RuntimeError:
-            continue
+    except RuntimeError:
+        pass
     order = {message_id: index for index, message_id in enumerate(references)}
     return sorted(found, key=lambda item: order.get(item["message_id"], 0))
 
@@ -171,10 +196,10 @@ def send(account: Account, to: list[str], subject: str, text: str, html: Optiona
         smtp.login(address, password)
         smtp.send_message(message)
     try:
-        with imap_session(account, SENT_FOLDER, readonly=False) as imap:
-            imap.append(_quote(SENT_FOLDER), "(\\Seen)", None, message.as_bytes())
-    except Exception:
-        pass
+        with imap_session(account) as imap:
+            imap.append(_quote(sent_folder(imap)), "(\\Seen)", None, message.as_bytes())
+    except Exception as exc:
+        log.warning("mail gate: %s's sent copy of %s was not saved: %s", address, message["Message-ID"], exc)
     return str(message["Message-ID"])
 
 

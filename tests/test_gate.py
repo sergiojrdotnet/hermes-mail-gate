@@ -171,3 +171,70 @@ class GateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeImap:
+    LISTING = [b'(\\HasNoChildren \\Inbox) "/" "INBOX"', b'(\\HasNoChildren \\Junk) "/" "Junk"',
+               b'(\\HasNoChildren \\Sent) "/" "Sent Mail"', b'(\\HasNoChildren \\Trash) "/" "Trash"']
+
+    def __init__(self, *args, listing=None, **kwargs):
+        self.listing = self.LISTING if listing is None else listing
+        self.appended, self.selected = [], []
+
+    def login(self, *args):
+        return "OK", []
+
+    def select(self, folder, readonly=True):
+        self.selected.append(folder)
+        return "OK", [b"1"]
+
+    def list(self):
+        return "OK", self.listing
+
+    def append(self, folder, flags, date, raw):
+        self.appended.append(folder)
+        return "OK", []
+
+    def uid(self, command, *args):
+        return "OK", [b""]
+
+    def logout(self):
+        return "BYE", []
+
+
+class SentFolderTest(unittest.TestCase):
+    def test_the_special_use_flag_names_the_folder(self):
+        from mail_gate.mailbox import special_use_folder
+        self.assertEqual(special_use_folder(FakeImap.LISTING, "\\Sent"), "Sent Mail")
+        self.assertEqual(special_use_folder([b'(\\Sent) "." Outbox'], "\\Sent"), "Outbox")
+        self.assertEqual(special_use_folder([b'(\\Sent) "/" "My \\"Sent\\""'], "\\sent"), 'My "Sent"')
+        self.assertIsNone(special_use_folder([b'(\\HasNoChildren) "/" "Sent"'], "\\Sent"))
+
+    def send_with(self, imap):
+        from mail_gate import mailbox
+        with mock.patch("mail_gate.mailbox.smtplib.SMTP_SSL"), mock.patch("mail_gate.mailbox.imaplib.IMAP4_SSL", return_value=imap):
+            return mailbox.send(("ceo@example.org", "secret"), ["owner@example.org"], "Hi", "Body")
+
+    def test_a_sent_copy_lands_in_the_mailboxs_sent_folder(self):
+        imap = FakeImap()
+        self.assertTrue(self.send_with(imap).endswith("@example.org>"))
+        self.assertEqual(imap.appended, ['"Sent Mail"'])
+
+    def test_a_mailbox_without_the_flag_uses_sent(self):
+        imap = FakeImap(listing=[b'(\\HasNoChildren) "/" "INBOX"'])
+        self.send_with(imap)
+        self.assertEqual(imap.appended, ['"Sent"'])
+
+    def test_a_failed_copy_is_logged_and_the_mail_still_counts_as_sent(self):
+        imap = FakeImap()
+        imap.append = mock.Mock(side_effect=OSError("append refused"))
+        with self.assertLogs("mail_gate.mailbox", level="WARNING") as logs:
+            self.assertTrue(self.send_with(imap))
+        self.assertIn("append refused", logs.output[0])
+
+    def test_thread_lookup_reads_the_sent_folder_too(self):
+        from mail_gate import mailbox
+        imap = FakeImap()
+        with mock.patch("mail_gate.mailbox.imaplib.IMAP4_SSL", return_value=imap):
+            mailbox.thread_messages(("ceo@example.org", "secret"), ["<a@x>"])
+        self.assertEqual(imap.selected[-1], '"Sent Mail"')

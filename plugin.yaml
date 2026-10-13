@@ -1,6 +1,6 @@
 manifest_version: 2
 name: hermes-mail-gate
-version: 0.1.0
+version: 0.1.1
 description: "Gate a bot's inbound email by per-bot allow, block and trust rules, with mailbox tools for the bot and a Mail Gate page in the dashboard and Desktop."
 homepage: "https://github.com/sergiojrdotnet/hermes-mail-gate"
 provides_tools: [mail_read, mail_save_attachment, mail_send, mail_move_to_junk, mail_gate_pending]
