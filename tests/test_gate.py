@@ -107,6 +107,22 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.run_gate(payload()), gate.SILENT)
         self.assertEqual(self.outcomes(), ["dropped-blocked"])
 
+    def test_a_slow_mailbox_still_delivers_trusted_mail_in_time(self, describe, thread_messages, *_):
+        import threading
+        import time
+        release = threading.Event()
+        describe.side_effect = lambda *a, **k: release.wait(3) and None
+        thread_messages.side_effect = lambda *a, **k: release.wait(3) and []
+        started = time.monotonic()
+        with mock.patch.object(gate, "MAILBOX_SECONDS", 0.3):
+            delivered = json.loads(self.run_gate(payload(sender=OWNER), mode=gate.TRUSTED))
+        release.set()
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(delivered["mail"]["subject"], "Invoice 42")
+        self.assertIn("too slow", delivered["mail"]["attachments_text"])
+        self.assertIn("too slow", delivered["thread"])
+        self.assertEqual(self.outcomes(), ["delivered"])
+
     def test_allowed_sender_is_delivered_with_metadata_only_logged(self, *_):
         self.store.set_rule("ceo", "address", "supplier@vendor.example", "allow")
         delivered = json.loads(self.run_gate(payload()))

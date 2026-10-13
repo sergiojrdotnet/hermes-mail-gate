@@ -5,8 +5,10 @@ JSON object printed here, which the route's prompt template then renders for the
 """
 import json
 import sys
+import threading
+import time
 import traceback
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from mail_gate import mailbox
 from mail_gate.message import describe_attachments, single_sender, summarize
@@ -16,13 +18,32 @@ from mail_gate.verdict import authentication, decide
 
 SILENT = "[SILENT]"
 RESTRICTED, TRUSTED = "mail", "mail-trusted"
+# Hermes kills a route script after 30 s and drops the mail; the mailbox lookups share what is left after startup.
+MAILBOX_SECONDS = 20.0
+TOO_SLOW = object()
 
 
-def _enrich(mail: dict[str, Any]) -> dict[str, Any]:
-    try:
-        stored = mailbox.describe(mailbox.credentials(mail["bot"]), mail["message_id"])
-    except Exception:
-        stored = None
+def _within(deadline: float, lookup: Callable[[], Any]) -> Any:
+    """``lookup()``'s result, or TOO_SLOW once ``deadline`` passes; a stuck IMAP call is abandoned, never waited on."""
+    result: list[Any] = [TOO_SLOW]
+
+    def run() -> None:
+        try:
+            result[0] = lookup()
+        except Exception:
+            result[0] = None
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()))
+    return result[0]
+
+
+def _enrich(mail: dict[str, Any], deadline: float) -> dict[str, Any]:
+    stored = _within(deadline, lambda: mailbox.describe(mailbox.credentials(mail["bot"]), mail["message_id"]))
+    if stored is TOO_SLOW:
+        mail["attachments_text"] = "unknown (the mailbox was too slow to list them)"
+        return mail
     if stored is None:
         mail["attachments_text"] = "unknown (the mailbox copy was not found)"
         return mail
@@ -33,20 +54,21 @@ def _enrich(mail: dict[str, Any]) -> dict[str, Any]:
     return mail
 
 
-def _thread(mail: dict[str, Any]) -> str:
-    try:
-        earlier = mailbox.thread_messages(mailbox.credentials(mail["bot"]), mail.get("references") or [])
-    except Exception:
-        earlier = []
+def _thread(mail: dict[str, Any], deadline: float) -> str:
+    earlier = _within(deadline, lambda: mailbox.thread_messages(mailbox.credentials(mail["bot"]),
+                                                               mail.get("references") or []))
+    if earlier is TOO_SLOW:
+        return "(the mailbox was too slow to look up earlier messages of this thread)"
     if not earlier:
         return "(no earlier messages of this thread were found in the mailbox)"
     return "\n\n".join(f"--- {item['date']} · {item['from']} · {item['subject']}\n{item['text']}" for item in earlier)
 
 
 def _deliver(store: Store, bot: str, route: str, outcome: str, mail: dict[str, Any], auth: str) -> str:
-    _enrich(mail)
+    deadline = time.monotonic() + MAILBOX_SECONDS
+    _enrich(mail, deadline)
     store.log(bot, route, outcome, mail, auth)
-    return json.dumps({"mail": mail, "thread": _thread(mail)})
+    return json.dumps({"mail": mail, "thread": _thread(mail, deadline)})
 
 
 def evaluate(store: Store, bot: str, mode: str, payload: dict[str, Any]) -> str:
